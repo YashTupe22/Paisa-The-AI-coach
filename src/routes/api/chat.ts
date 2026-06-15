@@ -2,15 +2,18 @@ import { createFileRoute } from "@tanstack/react-router";
 import { createLovableAiGatewayProvider } from "@/lib/ai-gateway.server";
 import { streamText, convertToModelMessages, type UIMessage } from "ai";
 
-type Body = { messages?: Array<{ role: "user" | "assistant"; content: string }> };
+type Body = {
+  messages?: Array<{ role: "user" | "assistant"; content: string }>;
+  userContext?: string;
+};
 
-const SYSTEM_PROMPT = `You are an expert AI Personal Finance Coach for Indian users. You have access to the user's financial data including transactions, account balances, goals, investments, and EMIs. Provide concise, actionable advice in simple language. Format responses clearly with bullet points and ₹ symbols. Always contextualize advice for Indian tax laws, investment products (PPF, NPS, ELSS, FD, mutual funds), and UPI/banking norms. Never recommend specific stocks. Keep responses under 200 words unless the user asks for detail.`;
+const BASE_PROMPT = `You are an expert AI Personal Finance Coach for Indian users. Provide concise, actionable advice in simple language. Use bullet points and ₹ symbols. Reference Indian tax laws and products (PPF, NPS, ELSS, FD, mutual funds, UPI). Never recommend specific stocks. Keep responses under 200 words unless asked for detail.`;
 
 export const Route = createFileRoute("/api/chat")({
   server: {
     handlers: {
       POST: async ({ request }) => {
-        const { messages } = (await request.json()) as Body;
+        const { messages, userContext } = (await request.json()) as Body;
         if (!Array.isArray(messages) || messages.length === 0) {
           return new Response("Messages required", { status: 400 });
         }
@@ -18,9 +21,12 @@ export const Route = createFileRoute("/api/chat")({
         if (!key) return new Response("Missing LOVABLE_API_KEY", { status: 500 });
 
         const gateway = createLovableAiGatewayProvider(key);
-        const model = gateway("google/gemini-3-flash-preview");
+        const model = gateway("google/gemini-2.5-flash");
 
-        // Convert simple {role, content} to UIMessage parts
+        const system = userContext
+          ? `${BASE_PROMPT}\n\nThe user's current financial data (JSON):\n${userContext}\n\nUse this data to answer specifically. Cite exact ₹ amounts, merchants, and categories from it. If asked about something not in the data, say so.`
+          : BASE_PROMPT;
+
         const uiMessages: UIMessage[] = messages.slice(-10).map((m, i) => ({
           id: String(i),
           role: m.role,
@@ -29,7 +35,7 @@ export const Route = createFileRoute("/api/chat")({
 
         const result = streamText({
           model,
-          system: SYSTEM_PROMPT,
+          system,
           messages: await convertToModelMessages(uiMessages),
         });
 

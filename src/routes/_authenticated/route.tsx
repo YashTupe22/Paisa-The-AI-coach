@@ -3,6 +3,8 @@ import { supabase } from "@/integrations/supabase/client";
 import { LayoutDashboard, Receipt, Target, TrendingUp, Calendar, MessageSquareText, BarChart3, Settings, Wallet, LogOut, Sun, Moon } from "lucide-react";
 import { toast } from "sonner";
 import { useTheme } from "@/components/theme-provider";
+import { FloatingChat } from "@/components/floating-chat";
+import { useRealtimeInvalidate } from "@/hooks/use-realtime-invalidate";
 
 export const Route = createFileRoute("/_authenticated")({
   ssr: false,
@@ -29,6 +31,7 @@ function AuthedLayout() {
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const navigate = useNavigate();
   const { theme, toggle } = useTheme();
+  useRealtimeInvalidate();
 
   async function signOut() {
     await supabase.auth.signOut();
