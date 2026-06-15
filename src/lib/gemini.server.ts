@@ -1,71 +1,62 @@
-// Server-only: parses a PDF bank/credit-card statement into structured transactions
-// via Lovable AI Gateway → google/gemini-3-flash-preview using raw chat-completions
-// (the AI SDK doesn't currently emit PDF file parts, so we hit the gateway directly).
+// Server-only: parses bank statements (PDF, CSV, Excel) using Gemini.
+
+import { GEMINI_MODEL } from "@/lib/ai-gateway.server";
 
 export type ParsedTxn = {
-  date: string;          // YYYY-MM-DD
+  date: string;
   merchant_name: string;
-  amount: number;        // positive number
+  amount: number;
   type: "debit" | "credit";
   suggested_category: string;
 };
 
-const SYSTEM = `You are a bank-statement parser. Extract every transaction from the PDF and return strict JSON of the form:
-{"transactions":[{"date":"YYYY-MM-DD","merchant_name":"string","amount":1234.56,"type":"debit"|"credit","suggested_category":"Food & Dining"|"Transport"|"Shopping"|"Utilities"|"Entertainment"|"Salary"|"EMI"|"Investment"|"Transfer"|"Other"}]}
+const CATEGORIES = "Food & Dining|Transport|Shopping|Utilities|Entertainment|Salary|EMI|Investment|Transfer|Other";
+
+const SYSTEM = `You are a bank-statement parser for Indian users. Extract every transaction and assign a spending category.
+
+Return strict JSON:
+{"transactions":[{"date":"YYYY-MM-DD","merchant_name":"string","amount":1234.56,"type":"debit"|"credit","suggested_category":"${CATEGORIES}"}]}
+
 Rules:
 - amount is always positive.
-- type is "debit" for money out (withdrawals, purchases) and "credit" for money in (salary, refunds, transfers in).
-- Skip headers, balances, and summary rows.
-- If no transactions, return {"transactions":[]}.
+- type "debit" = money out (purchases, withdrawals, EMI, SIP, transfers out).
+- type "credit" = money in (salary, refunds, interest, transfers in).
+- suggested_category: infer from merchant/description (e.g. Swiggy/Zomato → Food & Dining, Uber/Ola → Transport, SIP/mutual fund → Investment, loan EMI → EMI, salary → Salary).
+- Skip headers, opening/closing balance rows, and summary lines.
+- Handle any column layout — banks use different formats.
+- If no transactions found, return {"transactions":[]}.
 Return ONLY the JSON object, no prose, no markdown fences.`;
 
-export async function parsePdfWithGemini(pdfBase64: string, filename: string): Promise<ParsedTxn[]> {
-  const key = process.env.LOVABLE_API_KEY;
-  if (!key) throw new Error("LOVABLE_API_KEY not configured");
+async function callGemini(parts: Array<{ text?: string; inline_data?: { mime_type: string; data: string } }>, label: string): Promise<ParsedTxn[]> {
+  const key = process.env.GEMINI_API_KEY;
+  if (!key) throw new Error("GEMINI_API_KEY not configured");
 
   const body = {
-    model: "google/gemini-2.5-flash",
-    messages: [
-      { role: "system", content: SYSTEM },
-      {
-        role: "user",
-        content: [
-          { type: "text", text: "Parse this statement and return the JSON." },
-          { type: "file", file: { filename, file_data: `data:application/pdf;base64,${pdfBase64}` } },
-        ],
-      },
-    ],
-    response_format: { type: "json_object" },
+    system_instruction: { parts: [{ text: SYSTEM }] },
+    contents: [{ role: "user", parts }],
+    generationConfig: { responseMimeType: "application/json" },
   };
-
-  console.log(`[parsePdfWithGemini] filename=${filename} base64Bytes=${pdfBase64.length}`);
 
   let res: Response;
   try {
-    res = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Lovable-API-Key": key,
-        "X-Lovable-AIG-SDK": "raw-fetch",
-      },
-      body: JSON.stringify(body),
-    });
-  } catch (err) {
-    console.error("[parsePdfWithGemini] network error", err);
+    res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`,
+      { method: "POST", headers: { "Content-Type": "application/json", "x-goog-api-key": key }, body: JSON.stringify(body) },
+    );
+  } catch {
     throw new Error("Could not reach the AI gateway. Please try again.");
   }
 
   if (!res.ok) {
     const text = await res.text();
-    console.error(`[parsePdfWithGemini] gateway ${res.status}: ${text.slice(0, 500)}`);
+    console.error(`[${label}] Gemini API ${res.status}: ${text.slice(0, 500)}`);
     if (res.status === 429) throw new Error("AI rate limit reached, try again in a minute.");
-    if (res.status === 402) throw new Error("AI credits exhausted. Add credits in workspace settings.");
-    if (res.status === 413) throw new Error("PDF too large for the model. Try a smaller file.");
-    throw new Error(`Gemini failed (${res.status}): ${text.slice(0, 200)}`);
+    if (res.status === 413) throw new Error("File too large for the model. Try a smaller export.");
+    throw new Error(`AI analysis failed (${res.status})`);
   }
+
   const json = await res.json();
-  const content: string = json?.choices?.[0]?.message?.content ?? "{}";
+  const content: string = json?.candidates?.[0]?.content?.parts?.[0]?.text ?? "{}";
   let parsed: { transactions?: ParsedTxn[] };
   try {
     parsed = JSON.parse(content);
@@ -73,6 +64,30 @@ export async function parsePdfWithGemini(pdfBase64: string, filename: string): P
     const m = content.match(/\{[\s\S]*\}/);
     parsed = m ? JSON.parse(m[0]) : { transactions: [] };
   }
-  console.log(`[parsePdfWithGemini] extracted ${parsed.transactions?.length ?? 0} transactions`);
-  return (parsed.transactions ?? []).filter((t) => t.date && t.amount && t.merchant_name);
+
+  const txns = (parsed.transactions ?? []).filter((t) => t.date && t.amount && t.merchant_name);
+  console.log(`[${label}] extracted ${txns.length} transactions`);
+  return txns;
+}
+
+export async function parsePdfWithGemini(pdfBase64: string, filename: string): Promise<ParsedTxn[]> {
+  return callGemini(
+    [
+      { text: `Parse the attached bank statement (${filename}) and categorize every transaction.` },
+      { inline_data: { mime_type: "application/pdf", data: pdfBase64 } },
+    ],
+    "parsePdf",
+  );
+}
+
+export async function parseSpreadsheetWithGemini(csvText: string, filename: string): Promise<ParsedTxn[]> {
+  const maxChars = 120_000;
+  const truncated = csvText.length > maxChars;
+  const text = truncated ? csvText.slice(0, maxChars) : csvText;
+  const note = truncated ? "\n\n(Note: file was truncated — parse all visible rows.)" : "";
+
+  return callGemini(
+    [{ text: `Analyze this bank statement export (${filename}) and extract + categorize every transaction:\n\n${text}${note}` }],
+    "parseSpreadsheet",
+  );
 }

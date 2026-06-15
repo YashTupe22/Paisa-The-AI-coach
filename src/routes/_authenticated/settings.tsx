@@ -4,6 +4,8 @@ import { useState, useRef } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { useServerFn } from "@tanstack/react-start";
 import { parseStatement } from "@/lib/statements.functions";
+import { computeHealthScore } from "@/lib/health-score.functions";
+import { EXPENSE_CATEGORIES } from "@/lib/finance-stats";
 import { formatINR, formatDate } from "@/lib/format";
 import type { Database } from "@/integrations/supabase/types";
 import { toast } from "sonner";
@@ -46,16 +48,16 @@ function ProfileTab() {
       return (await supabase.from("profiles").select("*").eq("id", user.id).maybeSingle()).data;
     },
   });
-  const [f, setF] = useState({ name: "", monthly_income: "", occupation: "" });
+  const [f, setF] = useState({ name: "", monthly_income: "", occupation: "", employer: "" });
   const initialized = useRef(false);
   if (profile && !initialized.current) {
     initialized.current = true;
-    setF({ name: profile.name ?? "", monthly_income: String(profile.monthly_income ?? ""), occupation: profile.occupation ?? "" });
+    setF({ name: profile.name ?? "", monthly_income: String(profile.monthly_income ?? ""), occupation: profile.occupation ?? "", employer: profile.employer ?? "" });
   }
 
   async function save() {
     const { data: { user } } = await supabase.auth.getUser(); if (!user) return;
-    const { error } = await supabase.from("profiles").update({ name: f.name, monthly_income: Number(f.monthly_income) || 0, occupation: f.occupation }).eq("id", user.id);
+    const { error } = await supabase.from("profiles").update({ name: f.name, monthly_income: Number(f.monthly_income) || 0, occupation: f.occupation, employer: f.employer || null }).eq("id", user.id);
     if (error) return toast.error(error.message);
     toast.success("Saved"); qc.invalidateQueries({ queryKey: ["profile"] });
   }
@@ -69,6 +71,7 @@ function ProfileTab() {
           <option value="">—</option><option>Salaried</option><option>Self-employed</option><option>Business</option>
         </select>
       </label>
+      <label className="block"><span className="text-xs text-muted">Employer</span><input className="input-field mt-1" value={f.employer} onChange={(e) => setF({ ...f, employer: e.target.value })} /></label>
       <button onClick={save} className="btn-primary">Save</button>
     </div>
   );
@@ -187,12 +190,32 @@ function AccountDialog({ onClose, onSaved }: { onClose: () => void; onSaved: () 
 
 type Parsed = { date: string; merchant_name: string; amount: number; type: "debit" | "credit"; suggested_category: string };
 type TransactionInsert = Database["public"]["Tables"]["transactions"]["Insert"];
+type FileType = "pdf" | "csv" | "xlsx" | "xls";
+
+const ACCEPTED = [".pdf", ".csv", ".xls", ".xlsx"];
+const MIME_MAP: Record<string, FileType> = {
+  "application/pdf": "pdf",
+  "text/csv": "csv",
+  "application/vnd.ms-excel": "xls",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
+};
+
+function detectFileType(file: File): FileType | null {
+  const ext = file.name.toLowerCase().split(".").pop();
+  if (ext === "pdf") return "pdf";
+  if (ext === "csv") return "csv";
+  if (ext === "xls") return "xls";
+  if (ext === "xlsx") return "xlsx";
+  return MIME_MAP[file.type] ?? null;
+}
 
 function StatementsTab() {
   const qc = useQueryClient();
   const parseFn = useServerFn(parseStatement);
+  const scoreFn = useServerFn(computeHealthScore);
   const fileRef = useRef<HTMLInputElement>(null);
   const [parsing, setParsing] = useState(false);
+  const [parsePhase, setParsePhase] = useState<"uploading" | "analyzing" | null>(null);
   const [review, setReview] = useState<Parsed[] | null>(null);
   const [reviewFilename, setReviewFilename] = useState("");
 
@@ -208,41 +231,54 @@ function StatementsTab() {
   });
 
   async function handleFile(file: File) {
-    if (!file.name.toLowerCase().endsWith(".pdf")) return toast.error("Please upload a PDF.");
-    if (file.size > 6 * 1024 * 1024) return toast.error("Max 6 MB — large PDFs exceed the AI gateway limit.");
+    const fileType = detectFileType(file);
+    if (!fileType) return toast.error("Please upload a PDF, CSV, or Excel file.");
+    const maxSize = fileType === "pdf" ? 6 * 1024 * 1024 : 10 * 1024 * 1024;
+    if (file.size > maxSize) return toast.error(`Max ${fileType === "pdf" ? "6" : "10"} MB for this file type.`);
     setParsing(true);
+    setParsePhase("uploading");
     const { data: { user } } = await supabase.auth.getUser();
-    if (!user) { setParsing(false); return; }
+    if (!user) { setParsing(false); setParsePhase(null); return; }
 
-    // 1. Upload to storage
     const path = `${user.id}/${Date.now()}-${file.name}`;
     const up = await supabase.storage.from("statements").upload(path, file);
-    if (up.error) { setParsing(false); return toast.error(up.error.message); }
+    if (up.error) { setParsing(false); setParsePhase(null); return toast.error(up.error.message); }
 
-    const { data: stmt } = await supabase.from("uploaded_statements").insert({
+    const { data: stmt, error: stmtErr } = await supabase.from("uploaded_statements").insert({
       user_id: user.id, file_name: file.name, file_path: path, status: "processing",
     }).select().single();
+    if (stmtErr || !stmt) { setParsing(false); setParsePhase(null); return toast.error(stmtErr?.message ?? "Could not save upload record."); }
 
-    // 2. base64 + send to Gemini
     try {
+      setParsePhase("analyzing");
       const b64 = await new Promise<string>((res, rej) => {
         const r = new FileReader();
         r.onload = () => { const s = String(r.result); res(s.slice(s.indexOf(",") + 1)); };
         r.onerror = () => rej(new Error("read error"));
         r.readAsDataURL(file);
       });
-      const out = await parseFn({ data: { pdfBase64: b64, filename: file.name } });
-      await supabase.from("uploaded_statements").update({ status: "done" }).eq("id", stmt!.id);
+      const out = await parseFn({ data: { fileBase64: b64, filename: file.name, fileType } });
+      const status = out.transactions.length > 0 ? "done" : "failed";
+      await supabase.from("uploaded_statements").update({ status }).eq("id", stmt.id);
       qc.invalidateQueries({ queryKey: ["statements"] });
+      if (out.transactions.length === 0) {
+        toast.error("AI found no transactions. Try a different export from your bank.");
+        return;
+      }
       setReview(out.transactions); setReviewFilename(file.name);
-      if (out.transactions.length === 0) toast.info("No transactions found in this PDF.");
+      toast.success(`AI categorized ${out.transactions.length} transactions — review before importing`);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : "Parse failed";
-      await supabase.from("uploaded_statements").update({ status: "failed" }).eq("id", stmt!.id);
+      await supabase.from("uploaded_statements").update({ status: "failed" }).eq("id", stmt.id);
       toast.error(msg);
     } finally {
       setParsing(false);
+      setParsePhase(null);
     }
+  }
+
+  function updateReviewCategory(index: number, category: string) {
+    setReview((prev) => prev?.map((t, i) => (i === index ? { ...t, suggested_category: category } : t)) ?? null);
   }
 
   async function importParsed() {
@@ -255,25 +291,47 @@ function StatementsTab() {
     }));
     const { error } = await supabase.from("transactions").insert(rows);
     if (error) return toast.error(error.message);
-    toast.success(`Imported ${rows.length} transactions`); setReview(null);
+    toast.success(`Imported ${rows.length} transactions — dashboard & reports updated`);
+    setReview(null);
     qc.invalidateQueries({ queryKey: ["transactions"] });
+    qc.invalidateQueries({ queryKey: ["period-txns"] });
+    qc.invalidateQueries({ queryKey: ["reports-trend"] });
+    qc.invalidateQueries({ queryKey: ["dashboard-transactions"] });
+    scoreFn({ data: undefined }).then(() => {
+      qc.invalidateQueries({ queryKey: ["score"] });
+      qc.invalidateQueries({ queryKey: ["insights"] });
+    }).catch(() => {});
   }
 
   return (
     <div className="space-y-4">
       <div className="surface-elev p-6">
-        <h3 className="heading-card flex items-center gap-2"><Sparkles className="h-4 w-4 text-accent" /> Upload statement PDF</h3>
-        <p className="mt-1 text-sm text-muted">Gemini will read the PDF and extract transactions. Review before importing.</p>
+        <h3 className="heading-card flex items-center gap-2"><Sparkles className="h-4 w-4 text-accent" /> Upload statement</h3>
+        <p className="mt-1 text-sm text-muted">Upload PDF, CSV, or Excel — AI reads the file, categorizes every transaction, then you review and import.</p>
+        <div className="mt-3 flex gap-2 text-xs">
+          <span className="pill">1. Upload</span>
+          <span className="text-muted">→</span>
+          <span className="pill">2. AI categorizes</span>
+          <span className="text-muted">→</span>
+          <span className="pill">3. Review & import</span>
+        </div>
         <div
           onDragOver={(e) => e.preventDefault()}
           onDrop={(e) => { e.preventDefault(); const f = e.dataTransfer.files?.[0]; if (f) handleFile(f); }}
           onClick={() => fileRef.current?.click()}
           className="mt-4 grid cursor-pointer place-items-center rounded-md border-2 border-dashed border-[var(--border)] py-10 text-center hover:bg-[var(--hover)]"
         >
-          {parsing ? <><Loader2 className="h-6 w-6 animate-spin text-accent" /><p className="mt-2 text-sm text-muted">Parsing with Gemini…</p></> :
-            <><Upload className="h-6 w-6 text-muted" /><p className="mt-2 text-sm text-muted">Drag a PDF here or click to choose</p></>}
+          {parsing ? (
+            <>
+              <Loader2 className="h-6 w-6 animate-spin text-accent" />
+              <p className="mt-2 text-sm text-muted">{parsePhase === "uploading" ? "Uploading file…" : "AI is analyzing & categorizing…"}</p>
+              <p className="mt-1 text-xs text-subtle">This may take 10–30 seconds</p>
+            </>
+          ) : (
+            <><Upload className="h-6 w-6 text-muted" /><p className="mt-2 text-sm text-muted">Drag a PDF, CSV, or Excel file here</p><p className="mt-1 text-xs text-subtle">Supported: {ACCEPTED.join(", ")}</p></>
+          )}
         </div>
-        <input ref={fileRef} type="file" accept="application/pdf" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) handleFile(f); e.target.value = ""; }} />
+        <input ref={fileRef} type="file" accept=".pdf,.csv,.xls,.xlsx,application/pdf,text/csv" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) handleFile(f); e.target.value = ""; }} />
       </div>
 
       {uploaded.length > 0 && (
@@ -294,7 +352,10 @@ function StatementsTab() {
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
           <div className="surface-elev max-h-[80vh] w-full max-w-3xl overflow-hidden">
             <div className="flex items-center justify-between border-b border-[var(--border)] p-4">
-              <h3 className="heading-card">Review {review.length} transactions from {reviewFilename}</h3>
+              <div>
+                <h3 className="heading-card">Step 2: Review AI categories</h3>
+                <p className="mt-0.5 text-xs text-muted">{review.length} transactions from {reviewFilename} — edit categories if needed, then import</p>
+              </div>
               <button onClick={() => setReview(null)}><X className="h-4 w-4" /></button>
             </div>
             <div className="border-b border-[var(--border)] p-4">
@@ -312,7 +373,11 @@ function StatementsTab() {
                     <tr key={i}>
                       <td className="px-3 py-2 text-muted">{t.date}</td>
                       <td className="px-3 py-2 text-foreground">{t.merchant_name}</td>
-                      <td className="px-3 py-2 text-muted">{t.suggested_category}</td>
+                      <td className="px-3 py-2">
+                        <select className="input-field !h-8 !py-0 text-xs" value={t.suggested_category} onChange={(e) => updateReviewCategory(i, e.target.value)}>
+                          {[...EXPENSE_CATEGORIES, "Salary"].map((c) => <option key={c} value={c}>{c}</option>)}
+                        </select>
+                      </td>
                       <td className={`num px-3 py-2 text-right ${t.type === "debit" ? "text-destructive" : "text-success"}`}>{t.type === "debit" ? "-" : "+"}{formatINR(t.amount)}</td>
                     </tr>
                   ))}
@@ -321,7 +386,7 @@ function StatementsTab() {
             </div>
             <div className="flex justify-end gap-2 border-t border-[var(--border)] p-4">
               <button onClick={() => setReview(null)} className="btn-ghost">Cancel</button>
-              <button onClick={importParsed} disabled={review.length === 0} className="btn-primary">Import all</button>
+              <button onClick={importParsed} disabled={review.length === 0} className="btn-primary">Step 3: Import to dashboard & reports</button>
             </div>
           </div>
         </div>

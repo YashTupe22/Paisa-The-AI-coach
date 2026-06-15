@@ -1,9 +1,12 @@
-import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
-import { useQuery } from "@tanstack/react-query";
-import { useEffect } from "react";
+import { createFileRoute, Link } from "@tanstack/react-router";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useRef } from "react";
+import { useServerFn } from "@tanstack/react-start";
 import { supabase } from "@/integrations/supabase/client";
 import { formatINR, formatDate } from "@/lib/format";
-import { ArrowDownRight, ArrowUpRight, Bell, Sparkles } from "lucide-react";
+import { computeHealthScore } from "@/lib/health-score.functions";
+import { computePeriodStats, currentMonthKey, monthRange } from "@/lib/finance-stats";
+import { ArrowDownRight, ArrowUpRight, Bell, Sparkles, Loader2 } from "lucide-react";
 
 export const Route = createFileRoute("/_authenticated/dashboard")({
   head: () => ({ meta: [{ title: "Dashboard — Paisa" }] }),
@@ -11,9 +14,10 @@ export const Route = createFileRoute("/_authenticated/dashboard")({
 });
 
 function Dashboard() {
-  const navigate = useNavigate();
+  const qc = useQueryClient();
+  const computeFn = useServerFn(computeHealthScore);
+  const scoringRef = useRef(false);
 
-  // Redirect to onboarding if not complete
   const { data: profile } = useQuery({
     queryKey: ["profile"],
     queryFn: async () => {
@@ -23,10 +27,6 @@ function Dashboard() {
       return data;
     },
   });
-
-  useEffect(() => {
-    if (profile && !profile.onboarding_complete) navigate({ to: "/onboarding" });
-  }, [profile, navigate]);
 
   const { data: txns = [] } = useQuery({
     queryKey: ["dashboard-transactions"],
@@ -43,32 +43,66 @@ function Dashboard() {
     queryKey: ["goals"],
     queryFn: async () => (await supabase.from("goals").select("*").order("created_at")).data ?? [],
   });
+  const { data: investments = [] } = useQuery({
+    queryKey: ["investments"],
+    queryFn: async () => (await supabase.from("investments").select("current_value,invested_amount")).data ?? [],
+  });
   const { data: insights = [] } = useQuery({
     queryKey: ["insights"],
     queryFn: async () => (await supabase.from("ai_insights").select("*").order("created_at", { ascending: false })).data ?? [],
   });
-  const { data: score } = useQuery({
+  const { data: score, isLoading: scoreLoading } = useQuery({
     queryKey: ["score"],
     queryFn: async () => (await supabase.from("financial_health_scores").select("*").order("calculated_at", { ascending: false }).limit(1).maybeSingle()).data,
   });
 
   const totalBalance = accounts.reduce((s, a) => s + Number(a.balance ?? 0), 0);
+  const totalInvestments = investments.reduce((s, i) => s + Number(i.current_value ?? 0), 0);
   const monthlyIncome = Number(profile?.monthly_income ?? 0);
 
-  // Compute this month's expenses from txns we fetched (limited sample) — better to query
   const { data: monthTxns = [] } = useQuery({
-    queryKey: ["month-txns"],
+    queryKey: ["period-txns", currentMonthKey()],
     queryFn: async () => {
-      const start = new Date(); start.setDate(1);
-      const { data } = await supabase.from("transactions").select("amount,type,category,date").gte("date", start.toISOString().slice(0, 10));
+      const { start, end } = monthRange(currentMonthKey());
+      const { data } = await supabase.from("transactions").select("amount,type,category,merchant_name,date").gte("date", start).lte("date", end);
       return data ?? [];
     },
   });
-  const monthExpenses = monthTxns.filter((t) => t.type === "debit").reduce((s, t) => s + Number(t.amount), 0);
-  const savingsRate = monthlyIncome > 0 ? Math.max(0, Math.round(((monthlyIncome - monthExpenses) / monthlyIncome) * 100)) : 0;
 
-  const scoreVal = score?.total_score ?? 68;
-  const scoreColor = scoreVal < 40 ? "text-destructive" : scoreVal < 70 ? "text-[#eab308]" : "text-success";
+  const { data: prevMonthTxns = [] } = useQuery({
+    queryKey: ["period-txns", (() => { const d = new Date(); d.setMonth(d.getMonth() - 1); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`; })()],
+    queryFn: async () => {
+      const d = new Date(); d.setMonth(d.getMonth() - 1);
+      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+      const { start, end } = monthRange(key);
+      const { data } = await supabase.from("transactions").select("amount,type,date").gte("date", start).lte("date", end);
+      return data ?? [];
+    },
+  });
+
+  const periodStats = computePeriodStats(monthTxns, monthlyIncome);
+  const prevStats = computePeriodStats(prevMonthTxns, monthlyIncome);
+  const monthExpenses = periodStats.expense;
+  const savingsRate = periodStats.savingsRate;
+  const expenseChange = prevStats.expense > 0 ? Math.round(((monthExpenses - prevStats.expense) / prevStats.expense) * 100) : 0;
+
+  const scoreStale = !score || (Date.now() - new Date(score.calculated_at).getTime() > 24 * 60 * 60 * 1000);
+  const hasData = monthTxns.length > 0 || accounts.length > 0 || investments.length > 0;
+
+  useEffect(() => {
+    if (!profile?.onboarding_complete || !hasData || !scoreStale || scoringRef.current) return;
+    scoringRef.current = true;
+    computeFn({ data: undefined })
+      .then(() => {
+        qc.invalidateQueries({ queryKey: ["score"] });
+        qc.invalidateQueries({ queryKey: ["insights"] });
+      })
+      .catch(() => { scoringRef.current = false; });
+  }, [profile?.onboarding_complete, hasData, scoreStale, computeFn, qc]);
+
+  const scoreVal = score?.total_score ?? null;
+  const scoreColor = scoreVal == null ? "text-muted" : scoreVal < 40 ? "text-destructive" : scoreVal < 70 ? "text-[#eab308]" : "text-success";
+  const computing = scoreLoading || (scoreStale && hasData && scoreVal == null);
 
   return (
     <div className="p-6 md:p-8">
@@ -78,7 +112,10 @@ function Dashboard() {
           <p className="mt-1 text-sm text-muted">Welcome back{profile?.name ? `, ${profile.name.split(" ")[0]}` : ""}.</p>
         </div>
         <div className="flex items-center gap-3">
-          <span className={`pill ${scoreColor}`}><Sparkles className="h-3 w-3" /> Health {scoreVal}/100</span>
+          <span className={`pill ${scoreColor}`}>
+            {computing ? <Loader2 className="h-3 w-3 animate-spin" /> : <Sparkles className="h-3 w-3" />}
+            {computing ? "Scoring…" : scoreVal != null ? `Health ${scoreVal}/100` : "Add data for score"}
+          </span>
           <button className="relative grid h-9 w-9 place-items-center rounded-md border border-[var(--border)] bg-[rgba(255,255,255,0.02)]">
             <Bell className="h-4 w-4 text-muted" />
             <span className="absolute right-1.5 top-1.5 h-1.5 w-1.5 rounded-full bg-accent" />
@@ -87,36 +124,59 @@ function Dashboard() {
       </header>
 
       <div className="grid gap-4 md:grid-cols-4">
-        <SummaryCard label="Total balance" value={formatINR(totalBalance)} change={8.4} />
-        <SummaryCard label="Monthly income" value={formatINR(monthlyIncome)} change={0} />
-        <SummaryCard label="Monthly expenses" value={formatINR(monthExpenses)} change={-12.1} invertColor />
-        <SummaryCard label="Savings rate" value={`${savingsRate}%`} change={3.2} />
+        <SummaryCard label="Total balance" value={formatINR(totalBalance)} sub={`${accounts.length} account${accounts.length !== 1 ? "s" : ""}`} />
+        <SummaryCard label="Monthly income" value={formatINR(monthlyIncome)} sub="From profile" />
+        <SummaryCard label="Monthly expenses" value={formatINR(monthExpenses)} change={expenseChange} invertColor sub={`${periodStats.txnCount} transactions`} />
+        <SummaryCard label="Investments" value={formatINR(totalInvestments)} sub={periodStats.investmentOutflow > 0 ? `${formatINR(periodStats.investmentOutflow)} invested this month` : `${savingsRate}% savings rate`} />
       </div>
 
       <div className="mt-4 grid gap-4 lg:grid-cols-[1.5fr_1fr]">
         <div className="surface-elev p-6">
           <div className="flex items-center justify-between">
             <h3 className="heading-card">Expense breakdown</h3>
-            <span className="text-xs text-muted">This month</span>
+            <Link to="/reports" className="text-xs text-accent">Full report →</Link>
           </div>
-          <ExpenseBreakdown txns={monthTxns} />
+          <ExpenseBreakdown categories={periodStats.byCategory} total={periodStats.expense} txnCount={periodStats.txnCount} />
+          {(periodStats.investmentOutflow > 0 || periodStats.emiOutflow > 0) && (
+            <div className="mt-4 flex flex-wrap gap-3 border-t border-[var(--border-subtle)] pt-4 text-xs">
+              {periodStats.investmentOutflow > 0 && (
+                <Link to="/investments" className="rounded-md border border-[var(--border)] px-3 py-1.5 text-body hover:bg-[var(--hover)]">
+                  Investment outflow: <span className="num text-foreground">{formatINR(periodStats.investmentOutflow)}</span>
+                </Link>
+              )}
+              {periodStats.emiOutflow > 0 && (
+                <Link to="/emi" className="rounded-md border border-[var(--border)] px-3 py-1.5 text-body hover:bg-[var(--hover)]">
+                  EMI paid: <span className="num text-foreground">{formatINR(periodStats.emiOutflow)}</span>
+                </Link>
+              )}
+            </div>
+          )}
         </div>
         <div className="surface-elev p-6">
           <h3 className="heading-card">Financial health</h3>
-          <div className={`num mt-3 text-5xl ${scoreColor}`}>{scoreVal}<span className="text-base text-subtle">/100</span></div>
-          <div className="mt-5 space-y-3">
-            {[
-              ["Savings rate", score?.savings_score ?? 72],
-              ["Debt ratio", score?.debt_score ?? 60],
-              ["Emergency fund", score?.emergency_score ?? 65],
-              ["Investment rate", score?.investment_score ?? 75],
-            ].map(([l, v]) => (
-              <div key={l as string}>
-                <div className="mb-1 flex justify-between text-xs"><span className="text-muted">{l}</span><span className="num text-foreground">{v as number}</span></div>
-                <div className="h-1.5 rounded-full bg-[var(--border)]"><div className="h-full rounded-full bg-accent" style={{ width: `${v as number}%` }} /></div>
+          {scoreVal != null ? (
+            <>
+              <div className={`num mt-3 text-5xl ${scoreColor}`}>{scoreVal}<span className="text-base text-subtle">/100</span></div>
+              <div className="mt-5 space-y-3">
+                {[
+                  ["Savings rate", score.savings_score],
+                  ["Debt ratio", score.debt_score],
+                  ["Emergency fund", score.emergency_score],
+                  ["Investment rate", score.investment_score],
+                ].map(([l, v]) => (
+                  <div key={l as string}>
+                    <div className="mb-1 flex justify-between text-xs"><span className="text-muted">{l}</span><span className="num text-foreground">{v as number}</span></div>
+                    <div className="h-1.5 rounded-full bg-[var(--border)]"><div className="h-full rounded-full bg-accent" style={{ width: `${v as number}%` }} /></div>
+                  </div>
+                ))}
               </div>
-            ))}
-          </div>
+            </>
+          ) : (
+            <div className="mt-6 text-sm text-muted">
+              {hasData ? "AI is calculating your score…" : "Add transactions, accounts, or investments to get your AI-powered health score."}
+              {!hasData && <Link to="/settings" className="mt-2 block text-accent">Upload a statement →</Link>}
+            </div>
+          )}
         </div>
       </div>
 
@@ -139,7 +199,7 @@ function Dashboard() {
                 <div className={`num text-sm ${t.type === "debit" ? "text-destructive" : "text-success"}`}>{t.type === "debit" ? "-" : "+"}{formatINR(Number(t.amount))}</div>
               </div>
             ))}
-            {txns.length === 0 && <EmptyRow label="No transactions yet" />}
+            {txns.length === 0 && <EmptyRow label="No transactions yet — upload a statement in Settings" />}
           </div>
         </div>
         <div className="surface-elev p-6">
@@ -177,59 +237,63 @@ function Dashboard() {
               {i.cta_label && i.cta_url && <Link to={i.cta_url as "/transactions"} className="mt-3 inline-block text-xs text-accent">{i.cta_label} →</Link>}
             </div>
           ))}
-          {insights.length === 0 && <EmptyRow label="No insights yet" />}
+          {insights.length === 0 && <EmptyRow label={hasData ? "Insights will appear after your health score is calculated" : "Add financial data to get AI insights"} />}
         </div>
       </div>
     </div>
   );
 }
 
-function SummaryCard({ label, value, change, invertColor }: { label: string; value: string; change: number; invertColor?: boolean }) {
-  const positive = invertColor ? change < 0 : change > 0;
+function SummaryCard({ label, value, change, invertColor, sub }: { label: string; value: string; change?: number; invertColor?: boolean; sub?: string }) {
+  const positive = change != null ? (invertColor ? change < 0 : change > 0) : false;
   return (
     <div className="surface-elev p-5">
       <div className="text-xs uppercase tracking-wide text-muted">{label}</div>
       <div className="num mt-2 text-2xl text-foreground">{value}</div>
-      {change !== 0 && (
+      {change != null && change !== 0 && (
         <div className={`mt-1 flex items-center gap-1 text-xs ${positive ? "text-success" : "text-destructive"}`}>
-          {positive ? <ArrowUpRight className="h-3 w-3" /> : <ArrowDownRight className="h-3 w-3" />} {Math.abs(change)}% MoM
+          {positive ? <ArrowUpRight className="h-3 w-3" /> : <ArrowDownRight className="h-3 w-3" />} {Math.abs(change)}% vs last month
         </div>
       )}
+      {sub && <div className="mt-1 text-xs text-muted">{sub}</div>}
     </div>
   );
 }
 
-function ExpenseBreakdown({ txns }: { txns: Array<{ amount: number; type: string; category: string | null }> }) {
-  const byCat: Record<string, number> = {};
-  txns.filter((t) => t.type === "debit").forEach((t) => {
-    const c = t.category || "Other";
-    byCat[c] = (byCat[c] || 0) + Number(t.amount);
-  });
-  const total = Object.values(byCat).reduce((s, v) => s + v, 0) || 1;
+function ExpenseBreakdown({ categories, total, txnCount }: { categories: Array<{ name: string; value: number }>; total: number; txnCount: number }) {
   const colors = ["#7170ff", "#27a644", "#eab308", "#ec4899", "#3b82f6", "#f97316", "#8a8f98"];
-  const entries = Object.entries(byCat).sort((a, b) => b[1] - a[1]);
   let acc = 0;
+  const denom = total || 1;
   return (
     <div className="mt-4 flex flex-wrap items-center gap-8">
-      <svg viewBox="0 0 42 42" className="h-44 w-44">
-        <circle cx="21" cy="21" r="15.9" fill="transparent" stroke="var(--border)" strokeWidth="6" />
-        {entries.map(([c, v], i) => {
-          const dash = (v / total) * 100;
-          const offset = 100 - acc;
-          acc += dash;
-          return <circle key={c} cx="21" cy="21" r="15.9" fill="transparent" stroke={colors[i % colors.length]} strokeWidth="6" strokeDasharray={`${dash} ${100 - dash}`} strokeDashoffset={offset} transform="rotate(-90 21 21)" />;
-        })}
-        <text x="21" y="22" textAnchor="middle" className="num" fontSize="4" fill="var(--foreground)">{formatINR(total, { compact: true })}</text>
-      </svg>
-      <ul className="flex-1 space-y-1.5 text-xs">
-        {entries.map(([c, v], i) => (
-          <li key={c} className="flex items-center justify-between gap-3">
-            <span className="flex items-center gap-2 text-body"><span className="h-2 w-2 rounded-sm" style={{ background: colors[i % colors.length] }} /> {c}</span>
-            <span className="num text-foreground">{formatINR(v)} <span className="text-subtle">({Math.round((v / total) * 100)}%)</span></span>
-          </li>
-        ))}
-        {entries.length === 0 && <li className="text-muted">No expenses this month yet.</li>}
-      </ul>
+      {categories.length === 0 ? (
+        <div className="w-full py-6 text-center text-sm text-muted">
+          No categorized expenses yet.
+          <Link to="/settings" className="mt-2 block text-accent">Upload a statement for AI categorization →</Link>
+        </div>
+      ) : (
+        <>
+          <svg viewBox="0 0 42 42" className="h-44 w-44">
+            <circle cx="21" cy="21" r="15.9" fill="transparent" stroke="var(--border)" strokeWidth="6" />
+            {categories.map(({ name, value }, i) => {
+              const dash = (value / denom) * 100;
+              const offset = 100 - acc;
+              acc += dash;
+              return <circle key={name} cx="21" cy="21" r="15.9" fill="transparent" stroke={colors[i % colors.length]} strokeWidth="6" strokeDasharray={`${dash} ${100 - dash}`} strokeDashoffset={offset} transform="rotate(-90 21 21)" />;
+            })}
+            <text x="21" y="22" textAnchor="middle" className="num" fontSize="4" fill="var(--foreground)">{formatINR(total, { compact: true })}</text>
+          </svg>
+          <ul className="flex-1 space-y-1.5 text-xs">
+            <li className="mb-2 text-subtle">{txnCount} transactions this month</li>
+            {categories.map(({ name, value }, i) => (
+              <li key={name} className="flex items-center justify-between gap-3">
+                <span className="flex items-center gap-2 text-body"><span className="h-2 w-2 rounded-sm" style={{ background: colors[i % colors.length] }} /> {name}</span>
+                <span className="num text-foreground">{formatINR(value)} <span className="text-subtle">({Math.round((value / denom) * 100)}%)</span></span>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
     </div>
   );
 }

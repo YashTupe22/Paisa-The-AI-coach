@@ -8,10 +8,25 @@ import { useRealtimeInvalidate } from "@/hooks/use-realtime-invalidate";
 
 export const Route = createFileRoute("/_authenticated")({
   ssr: false,
-  beforeLoad: async () => {
+  beforeLoad: async ({ location }) => {
     const { data, error } = await supabase.auth.getUser();
     if (error || !data.user) throw redirect({ to: "/auth/login" });
-    return { user: data.user };
+
+    const { data: profile } = await supabase
+      .from("profiles")
+      .select("onboarding_complete")
+      .eq("id", data.user.id)
+      .maybeSingle();
+
+    const onOnboarding = location.pathname === "/onboarding";
+    if (!profile?.onboarding_complete && !onOnboarding) {
+      throw redirect({ to: "/onboarding" });
+    }
+    if (profile?.onboarding_complete && onOnboarding) {
+      throw redirect({ to: "/dashboard" });
+    }
+
+    return { user: data.user, profile };
   },
   component: AuthedLayout,
 });
@@ -32,11 +47,24 @@ function AuthedLayout() {
   const navigate = useNavigate();
   const { theme, toggle } = useTheme();
   useRealtimeInvalidate();
+  const isOnboarding = pathname === "/onboarding";
 
   async function signOut() {
     await supabase.auth.signOut();
     toast.success("Signed out");
     navigate({ to: "/auth/login", replace: true });
+  }
+
+  if (isOnboarding) {
+    return (
+      <div className="min-h-screen bg-background">
+        <header className="flex h-14 items-center gap-2 border-b border-[var(--border)] px-6">
+          <div className="grid h-7 w-7 place-items-center rounded-md bg-primary"><Wallet className="h-4 w-4 text-white" /></div>
+          <span className="font-medium tracking-tight text-foreground">Paisa</span>
+        </header>
+        <Outlet />
+      </div>
+    );
   }
 
   return (

@@ -1,5 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { createLovableAiGatewayProvider } from "@/lib/ai-gateway.server";
+import { createGeminiProvider, GEMINI_MODEL } from "@/lib/ai-gateway.server";
 import { streamText, convertToModelMessages, type UIMessage } from "ai";
 
 type Body = {
@@ -17,11 +17,11 @@ export const Route = createFileRoute("/api/chat")({
         if (!Array.isArray(messages) || messages.length === 0) {
           return new Response("Messages required", { status: 400 });
         }
-        const key = process.env.LOVABLE_API_KEY;
-        if (!key) return new Response("Missing LOVABLE_API_KEY", { status: 500 });
+        const key = process.env.GEMINI_API_KEY;
+        if (!key) return new Response("Missing GEMINI_API_KEY", { status: 500 });
 
-        const gateway = createLovableAiGatewayProvider(key);
-        const model = gateway("google/gemini-2.5-flash");
+        const gemini = createGeminiProvider(key);
+        const model = gemini(GEMINI_MODEL);
 
         const system = userContext
           ? `${BASE_PROMPT}\n\nThe user's current financial data (JSON):\n${userContext}\n\nUse this data to answer specifically. Cite exact ₹ amounts, merchants, and categories from it. If asked about something not in the data, say so.`
