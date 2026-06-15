@@ -200,7 +200,7 @@ async function seedDemo(userId: string) {
       date: d.toISOString().slice(0, 10),
     });
   }
-  await supabase.from("transactions").insert(txns);
+  await supabase.from("transactions").insert(txns as any);
 
   await supabase.from("goals").insert([
     { user_id: userId, name: "Emergency Fund", type: "emergency_fund", target_amount: 300000, current_amount: 120000, monthly_contribution: 10000, deadline: addMonths(18), icon: "shield" },
