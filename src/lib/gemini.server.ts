@@ -24,7 +24,7 @@ export async function parsePdfWithGemini(pdfBase64: string, filename: string): P
   if (!key) throw new Error("LOVABLE_API_KEY not configured");
 
   const body = {
-    model: "google/gemini-3-flash-preview",
+    model: "google/gemini-2.5-flash",
     messages: [
       { role: "system", content: SYSTEM },
       {
@@ -38,21 +38,31 @@ export async function parsePdfWithGemini(pdfBase64: string, filename: string): P
     response_format: { type: "json_object" },
   };
 
-  const res = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Lovable-API-Key": key,
-      "X-Lovable-AIG-SDK": "raw-fetch",
-    },
-    body: JSON.stringify(body),
-  });
+  console.log(`[parsePdfWithGemini] filename=${filename} base64Bytes=${pdfBase64.length}`);
+
+  let res: Response;
+  try {
+    res = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Lovable-API-Key": key,
+        "X-Lovable-AIG-SDK": "raw-fetch",
+      },
+      body: JSON.stringify(body),
+    });
+  } catch (err) {
+    console.error("[parsePdfWithGemini] network error", err);
+    throw new Error("Could not reach the AI gateway. Please try again.");
+  }
 
   if (!res.ok) {
     const text = await res.text();
+    console.error(`[parsePdfWithGemini] gateway ${res.status}: ${text.slice(0, 500)}`);
     if (res.status === 429) throw new Error("AI rate limit reached, try again in a minute.");
     if (res.status === 402) throw new Error("AI credits exhausted. Add credits in workspace settings.");
-    throw new Error(`Gemini failed: ${res.status} ${text.slice(0, 300)}`);
+    if (res.status === 413) throw new Error("PDF too large for the model. Try a smaller file.");
+    throw new Error(`Gemini failed (${res.status}): ${text.slice(0, 200)}`);
   }
   const json = await res.json();
   const content: string = json?.choices?.[0]?.message?.content ?? "{}";
@@ -63,5 +73,6 @@ export async function parsePdfWithGemini(pdfBase64: string, filename: string): P
     const m = content.match(/\{[\s\S]*\}/);
     parsed = m ? JSON.parse(m[0]) : { transactions: [] };
   }
+  console.log(`[parsePdfWithGemini] extracted ${parsed.transactions?.length ?? 0} transactions`);
   return (parsed.transactions ?? []).filter((t) => t.date && t.amount && t.merchant_name);
 }
