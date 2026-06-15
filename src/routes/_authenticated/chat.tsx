@@ -49,6 +49,33 @@ function ChatPage() {
     if (data) { await loadSessions(); setActiveId(data.id); }
   }
 
+  async function buildUserContext(): Promise<string> {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return "";
+    const [profile, accounts, txns, goals, loans, investments] = await Promise.all([
+      supabase.from("profiles").select("name,monthly_income,monthly_expenses,city,age").eq("id", user.id).maybeSingle(),
+      supabase.from("bank_accounts").select("account_name,account_type,balance,outstanding_balance"),
+      supabase.from("transactions").select("date,merchant_name,category,type,amount").order("date", { ascending: false }).limit(50),
+      supabase.from("goals").select("name,target_amount,current_amount,deadline"),
+      supabase.from("loans").select("name,principal,outstanding,emi_amount,interest_rate"),
+      supabase.from("investments").select("name,type,current_value,invested_amount"),
+    ]);
+    const monthStart = new Date(); monthStart.setDate(1);
+    const monthTxns = (txns.data ?? []).filter((t) => new Date(t.date) >= monthStart);
+    const monthExpense = monthTxns.filter((t) => t.type === "debit").reduce((s, t) => s + Number(t.amount), 0);
+    const monthIncome = monthTxns.filter((t) => t.type === "credit").reduce((s, t) => s + Number(t.amount), 0);
+    const byCat: Record<string, number> = {};
+    monthTxns.filter((t) => t.type === "debit").forEach((t) => { byCat[t.category || "Other"] = (byCat[t.category || "Other"] || 0) + Number(t.amount); });
+    return JSON.stringify({
+      profile: profile.data,
+      totalBalance: (accounts.data ?? []).reduce((s, a) => s + Number(a.balance ?? 0), 0),
+      accounts: accounts.data,
+      thisMonth: { income: monthIncome, expense: monthExpense, byCategory: byCat },
+      recentTransactions: (txns.data ?? []).slice(0, 25),
+      goals: goals.data, loans: loans.data, investments: investments.data,
+    });
+  }
+
   async function send(text: string) {
     if (!text.trim() || streaming) return;
     let sessionId = activeId;
@@ -72,10 +99,14 @@ function ChatPage() {
     setMessages((m) => [...m, { id: assistantId, role: "assistant", content: "" }]);
 
     try {
+      const userContext = await buildUserContext();
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messages: nextMsgs.slice(-10).map((m) => ({ role: m.role, content: m.content })) }),
+        body: JSON.stringify({
+          userContext,
+          messages: nextMsgs.slice(-10).map((m) => ({ role: m.role, content: m.content })),
+        }),
       });
       if (!res.ok || !res.body) throw new Error(await res.text());
       const reader = res.body.getReader();
