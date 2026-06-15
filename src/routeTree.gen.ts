@@ -25,7 +25,6 @@ import { Route as AuthenticatedGoalsRouteImport } from './routes/_authenticated/
 import { Route as AuthenticatedEmiRouteImport } from './routes/_authenticated/emi'
 import { Route as AuthenticatedDashboardRouteImport } from './routes/_authenticated/dashboard'
 import { Route as AuthenticatedChatRouteImport } from './routes/_authenticated/chat'
-import { Route as ApiPublicSeedTestUsersRouteImport } from './routes/api/public/seed-test-users'
 
 const AuthenticatedRouteRoute = AuthenticatedRouteRouteImport.update({
   id: '/_authenticated',
@@ -108,11 +107,6 @@ const AuthenticatedChatRoute = AuthenticatedChatRouteImport.update({
   path: '/chat',
   getParentRoute: () => AuthenticatedRouteRoute,
 } as any)
-const ApiPublicSeedTestUsersRoute = ApiPublicSeedTestUsersRouteImport.update({
-  id: '/api/public/seed-test-users',
-  path: '/api/public/seed-test-users',
-  getParentRoute: () => rootRouteImport,
-} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
@@ -130,7 +124,6 @@ export interface FileRoutesByFullPath {
   '/auth/login': typeof AuthLoginRoute
   '/auth/register': typeof AuthRegisterRoute
   '/auth/reset-password': typeof AuthResetPasswordRoute
-  '/api/public/seed-test-users': typeof ApiPublicSeedTestUsersRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -148,7 +141,6 @@ export interface FileRoutesByTo {
   '/auth/login': typeof AuthLoginRoute
   '/auth/register': typeof AuthRegisterRoute
   '/auth/reset-password': typeof AuthResetPasswordRoute
-  '/api/public/seed-test-users': typeof ApiPublicSeedTestUsersRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -168,7 +160,6 @@ export interface FileRoutesById {
   '/auth/login': typeof AuthLoginRoute
   '/auth/register': typeof AuthRegisterRoute
   '/auth/reset-password': typeof AuthResetPasswordRoute
-  '/api/public/seed-test-users': typeof ApiPublicSeedTestUsersRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -188,7 +179,6 @@ export interface FileRouteTypes {
     | '/auth/login'
     | '/auth/register'
     | '/auth/reset-password'
-    | '/api/public/seed-test-users'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -206,7 +196,6 @@ export interface FileRouteTypes {
     | '/auth/login'
     | '/auth/register'
     | '/auth/reset-password'
-    | '/api/public/seed-test-users'
   id:
     | '__root__'
     | '/'
@@ -225,7 +214,6 @@ export interface FileRouteTypes {
     | '/auth/login'
     | '/auth/register'
     | '/auth/reset-password'
-    | '/api/public/seed-test-users'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -236,7 +224,6 @@ export interface RootRouteChildren {
   AuthLoginRoute: typeof AuthLoginRoute
   AuthRegisterRoute: typeof AuthRegisterRoute
   AuthResetPasswordRoute: typeof AuthResetPasswordRoute
-  ApiPublicSeedTestUsersRoute: typeof ApiPublicSeedTestUsersRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -353,13 +340,6 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedChatRouteImport
       parentRoute: typeof AuthenticatedRouteRoute
     }
-    '/api/public/seed-test-users': {
-      id: '/api/public/seed-test-users'
-      path: '/api/public/seed-test-users'
-      fullPath: '/api/public/seed-test-users'
-      preLoaderRoute: typeof ApiPublicSeedTestUsersRouteImport
-      parentRoute: typeof rootRouteImport
-    }
   }
 }
 
@@ -398,7 +378,6 @@ const rootRouteChildren: RootRouteChildren = {
   AuthLoginRoute: AuthLoginRoute,
   AuthRegisterRoute: AuthRegisterRoute,
   AuthResetPasswordRoute: AuthResetPasswordRoute,
-  ApiPublicSeedTestUsersRoute: ApiPublicSeedTestUsersRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

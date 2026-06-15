@@ -58,9 +58,12 @@ export type Database = {
           bank_name: string | null
           created_at: string
           credit_limit: number | null
+          due_day: number | null
           id: string
           last_synced: string | null
           last4: string | null
+          outstanding_balance: number | null
+          statement_day: number | null
           user_id: string
         }
         Insert: {
@@ -70,9 +73,12 @@ export type Database = {
           bank_name?: string | null
           created_at?: string
           credit_limit?: number | null
+          due_day?: number | null
           id?: string
           last_synced?: string | null
           last4?: string | null
+          outstanding_balance?: number | null
+          statement_day?: number | null
           user_id: string
         }
         Update: {
@@ -82,9 +88,12 @@ export type Database = {
           bank_name?: string | null
           created_at?: string
           credit_limit?: number | null
+          due_day?: number | null
           id?: string
           last_synced?: string | null
           last4?: string | null
+          outstanding_balance?: number | null
+          statement_day?: number | null
           user_id?: string
         }
         Relationships: []
@@ -404,6 +413,53 @@ export type Database = {
           user_id?: string
         }
         Relationships: []
+      }
+      payment_intents: {
+        Row: {
+          account_id: string | null
+          amount: number
+          created_at: string
+          currency: string
+          external_id: string | null
+          id: string
+          purpose: string
+          status: string
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          account_id?: string | null
+          amount: number
+          created_at?: string
+          currency?: string
+          external_id?: string | null
+          id?: string
+          purpose?: string
+          status?: string
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          account_id?: string | null
+          amount?: number
+          created_at?: string
+          currency?: string
+          external_id?: string | null
+          id?: string
+          purpose?: string
+          status?: string
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "payment_intents_account_id_fkey"
+            columns: ["account_id"]
+            isOneToOne: false
+            referencedRelation: "bank_accounts"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       profiles: {
         Row: {
