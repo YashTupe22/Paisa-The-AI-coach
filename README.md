@@ -109,6 +109,31 @@ Supabase migrations are in `supabase/migrations/`. Key tables:
 
 All tables have Row Level Security (RLS) policies scoped to authenticated users.
 
+## Deployment
+
+### Vercel (Recommended)
+
+1. Push your code to GitHub
+2. Go to [vercel.com](https://vercel.com) and import your repository
+3. Set the required environment variables in the Vercel dashboard:
+   - `GEMINI_API_KEY`
+   - `VITE_SUPABASE_URL`
+   - `VITE_SUPABASE_PUBLISHABLE_KEY`
+4. Deploy - Vercel will automatically detect the build configuration
+
+Alternatively, deploy via Vercel CLI:
+
+```bash
+npm i -g vercel
+vercel
+```
+
+### Manual Build
+
+```bash
+NITRO_PRESET=vercel bun run build
+```
+
 ## License
 
 MIT
