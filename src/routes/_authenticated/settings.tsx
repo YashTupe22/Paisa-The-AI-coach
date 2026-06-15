@@ -5,6 +5,7 @@ import { supabase } from "@/integrations/supabase/client";
 import { useServerFn } from "@tanstack/react-start";
 import { parseStatement } from "@/lib/statements.functions";
 import { formatINR, formatDate } from "@/lib/format";
+import type { Database } from "@/integrations/supabase/types";
 import { toast } from "sonner";
 import { useTheme } from "@/components/theme-provider";
 import { Sun, Moon, Upload, Plus, Trash2, X, CreditCard, FileText, Sparkles, Loader2, Wallet } from "lucide-react";
@@ -185,6 +186,7 @@ function AccountDialog({ onClose, onSaved }: { onClose: () => void; onSaved: () 
 }
 
 type Parsed = { date: string; merchant_name: string; amount: number; type: "debit" | "credit"; suggested_category: string };
+type TransactionInsert = Database["public"]["Tables"]["transactions"]["Insert"];
 
 function StatementsTab() {
   const qc = useQueryClient();
@@ -202,7 +204,7 @@ function StatementsTab() {
 
   const { data: uploaded = [] } = useQuery({
     queryKey: ["statements"],
-    queryFn: async () => (await supabase.from("uploaded_statements").select("*").order("created_at", { ascending: false })).data ?? [],
+    queryFn: async () => (await supabase.from("uploaded_statements").select("*").order("uploaded_at", { ascending: false })).data ?? [],
   });
 
   async function handleFile(file: File) {
@@ -218,7 +220,7 @@ function StatementsTab() {
     if (up.error) { setParsing(false); return toast.error(up.error.message); }
 
     const { data: stmt } = await supabase.from("uploaded_statements").insert({
-      user_id: user.id, file_name: file.name, file_url: path, status: "processing",
+      user_id: user.id, file_name: file.name, file_path: path, status: "processing",
     }).select().single();
 
     // 2. base64 + send to Gemini
@@ -230,13 +232,13 @@ function StatementsTab() {
         r.readAsDataURL(file);
       });
       const out = await parseFn({ data: { pdfBase64: b64, filename: file.name } });
-      await supabase.from("uploaded_statements").update({ status: "done", parsed_count: out.transactions.length }).eq("id", stmt!.id);
+      await supabase.from("uploaded_statements").update({ status: "done" }).eq("id", stmt!.id);
       qc.invalidateQueries({ queryKey: ["statements"] });
       setReview(out.transactions); setReviewFilename(file.name);
       if (out.transactions.length === 0) toast.info("No transactions found in this PDF.");
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : "Parse failed";
-      await supabase.from("uploaded_statements").update({ status: "error" }).eq("id", stmt!.id);
+      await supabase.from("uploaded_statements").update({ status: "failed" }).eq("id", stmt!.id);
       toast.error(msg);
     } finally {
       setParsing(false);
@@ -246,12 +248,12 @@ function StatementsTab() {
   async function importParsed() {
     if (!review) return;
     const { data: { user } } = await supabase.auth.getUser(); if (!user) return;
-    const rows = review.map((t) => ({
+    const rows: TransactionInsert[] = review.map((t) => ({
       user_id: user.id, account_id: targetAccount || null,
       merchant_name: t.merchant_name, amount: t.amount, type: t.type, category: t.suggested_category,
       ai_category: t.suggested_category, date: t.date,
     }));
-    const { error } = await supabase.from("transactions").insert(rows as never);
+    const { error } = await supabase.from("transactions").insert(rows);
     if (error) return toast.error(error.message);
     toast.success(`Imported ${rows.length} transactions`); setReview(null);
     qc.invalidateQueries({ queryKey: ["transactions"] });
@@ -280,8 +282,8 @@ function StatementsTab() {
           <ul className="divide-y divide-[var(--border-subtle)]">
             {uploaded.map((u) => (
               <li key={u.id} className="flex items-center justify-between py-2.5">
-                <div className="flex items-center gap-3"><FileText className="h-4 w-4 text-muted" /><div><div className="text-sm text-foreground">{u.file_name}</div><div className="text-xs text-muted">{formatDate(u.created_at)} • {u.parsed_count ?? 0} txns</div></div></div>
-                <span className={`pill ${u.status === "done" ? "text-success" : u.status === "error" ? "text-destructive" : "text-muted"}`}>{u.status}</span>
+                <div className="flex items-center gap-3"><FileText className="h-4 w-4 text-muted" /><div><div className="text-sm text-foreground">{u.file_name}</div><div className="text-xs text-muted">{formatDate(u.uploaded_at)}</div></div></div>
+                <span className={`pill ${u.status === "done" ? "text-success" : u.status === "failed" ? "text-destructive" : "text-muted"}`}>{u.status}</span>
               </li>
             ))}
           </ul>
