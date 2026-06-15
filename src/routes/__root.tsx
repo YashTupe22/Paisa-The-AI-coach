@@ -13,6 +13,7 @@ import { Toaster } from "sonner";
 import appCss from "../styles.css?url";
 import { supabase } from "@/integrations/supabase/client";
 import { reportLovableError } from "../lib/lovable-error-reporting";
+import { ThemeProvider } from "@/components/theme-provider";
 
 function NotFoundComponent() {
   return (
@@ -41,12 +42,7 @@ function ErrorComponent({ error, reset }: { error: Error; reset: () => void }) {
         <h1 className="heading-card">Something went wrong</h1>
         <p className="mt-2 text-sm text-muted">{error.message}</p>
         <div className="mt-6 flex justify-center gap-2">
-          <button
-            onClick={() => { router.invalidate(); reset(); }}
-            className="btn-primary"
-          >
-            Try again
-          </button>
+          <button onClick={() => { router.invalidate(); reset(); }} className="btn-primary">Try again</button>
           <Link to="/" className="btn-ghost">Home</Link>
         </div>
       </div>
@@ -61,7 +57,7 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
       { name: "viewport", content: "width=device-width, initial-scale=1" },
       { title: "Paisa — AI Personal Finance Coach for India" },
       { name: "description", content: "AI-powered financial coach for Indian users. Track expenses, build goals, and chat with an AI advisor about your money." },
-      { name: "theme-color", content: "#08090a" },
+      { name: "theme-color", content: "#fafafa" },
       { property: "og:title", content: "Paisa — AI Personal Finance Coach" },
       { property: "og:description", content: "Track expenses, build goals, and get AI-powered financial advice tailored for India." },
       { property: "og:type", content: "website" },
@@ -82,8 +78,13 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
 
 function RootShell({ children }: { children: ReactNode }) {
   return (
-    <html lang="en" className="dark">
+    <html lang="en">
       <head>
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `try{var t=localStorage.getItem('paisa-theme');if(t==='dark')document.documentElement.classList.add('dark');}catch(e){}`,
+          }}
+        />
         <HeadContent />
       </head>
       <body>
@@ -109,18 +110,19 @@ function RootComponent() {
 
   return (
     <QueryClientProvider client={queryClient}>
-      <Outlet />
-      <Toaster
-        position="bottom-right"
-        theme="dark"
-        toastOptions={{
-          style: {
-            background: "var(--card)",
-            border: "1px solid var(--border)",
-            color: "var(--foreground)",
-          },
-        }}
-      />
+      <ThemeProvider>
+        <Outlet />
+        <Toaster
+          position="bottom-right"
+          toastOptions={{
+            style: {
+              background: "var(--card)",
+              border: "1px solid var(--border)",
+              color: "var(--foreground)",
+            },
+          }}
+        />
+      </ThemeProvider>
     </QueryClientProvider>
   );
 }
