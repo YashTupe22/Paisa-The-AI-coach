@@ -209,7 +209,7 @@ function StatementsTab() {
 
   async function handleFile(file: File) {
     if (!file.name.toLowerCase().endsWith(".pdf")) return toast.error("Please upload a PDF.");
-    if (file.size > 15 * 1024 * 1024) return toast.error("Max 15 MB.");
+    if (file.size > 6 * 1024 * 1024) return toast.error("Max 6 MB — large PDFs exceed the AI gateway limit.");
     setParsing(true);
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) { setParsing(false); return; }
