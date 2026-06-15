@@ -84,6 +84,7 @@ function AuthedLayout() {
           </Link>
         ))}
       </nav>
+      {!pathname.startsWith("/chat") && <FloatingChat />}
     </div>
   );
 }
